@@ -101,6 +101,27 @@ namespace RepoScore.Services
                 new Octokit.GraphQL.ProductHeaderValue("reposcore-cs"), token);
         }
 
+        public bool RepositoryExists()
+        {
+            try
+            {
+                var query = new Octokit.GraphQL.Query()
+                    .Repository(_repo, _owner)
+                    .Select(r => new
+                    {
+                        r.Name
+                    });
+
+                var result = _graphQLConnection.Run(query).Result;
+
+                return result != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // 저장소의 머지된 전체 PR 목록을 GraphQL로 조회.
         // since가 지정된 경우 해당 시각 이후 업데이트된 PR만 가져옴.
         public List<PRRecord> GetPullRequests(DateTimeOffset? since = null)

@@ -34,10 +34,34 @@ CoconaApp.Run((
     var totalUserIssues = new Dictionary<string, List<IssueRecord>>();
     var totalUserPullRequests = new Dictionary<string, List<PRRecord>>();
 
+    // 모든 저장소 존재 여부를 먼저 검사
     foreach (var repo in repos)
     {
         var parts = repo.Split('/');
-        if (parts.Length != 2) { Console.Error.WriteLine($"오류: '{repo}'는 'owner/repo' 형식이 아닙니다. 건너뜁니다."); continue; }
+
+        if (parts.Length != 2)
+        {
+            Console.Error.WriteLine($"오류: '{repo}'는 'owner/repo' 형식이 아닙니다.");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        string ownerName = parts[0];
+        string repoName = parts[1];
+
+        var service = new GitHubService(ownerName, repoName, token, parsedKeywords);
+
+        if (!service.RepositoryExists())
+        {
+            Console.Error.WriteLine($"오류: 저장소 '{repo}'가 존재하지 않거나 접근할 수 없습니다.");
+            Environment.ExitCode = 1;
+            return;
+        }
+    }
+
+    foreach (var repo in repos)
+    {
+        var parts = repo.Split('/');
 
         string ownerName = parts[0];
         string repoName = parts[1];
