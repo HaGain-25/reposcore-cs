@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -10,6 +11,48 @@ using Spectre.Console;
 using System.Globalization;
 
 CultureInfo.DefaultThreadCurrentUICulture = new CultureInfo("en-US");
+
+// repos 인자가 없으면 Cocona가 자체적으로 에러 처리하므로,
+// 여기서는 repos 형식('owner/repo') 검증만 담당한다.
+// 검증 실패 시: 오류 메시지 일괄 출력 → help 출력(Cocona 내부 렌더러 재사용) → exit code 1.
+var formatErrors = new List<string>();
+// Cocona의 파라미터 파싱 규칙에 따라 positional argument(repos)는
+// 옵션 플래그(--)나 옵션값과 구분해야 한다.
+// "-"로 시작하지 않고, 바로 앞 인자가 값을 받는 옵션이 아닌 경우만 repo 후보로 간주한다.
+// 가장 안전한 방법: "--" 이후 또는 알려진 옵션 플래그 목록 외의 인자만 추출.
+var knownValueOptions = new HashSet<string> { "-t", "--token", "--claims", "-f", "--format", "-o", "--output", "--sort-by", "--sort-order", "--keywords" };
+var repoArgs = new List<string>();
+for (int i = 0; i < args.Length; i++)
+{
+    if (knownValueOptions.Contains(args[i]))
+    {
+        i++; // 다음 인자는 옵션 값이므로 건너뜀
+        continue;
+    }
+    if (args[i].StartsWith("-")) continue; // 플래그 옵션 건너뜀
+    repoArgs.Add(args[i]);
+}
+
+foreach (var repo in repoArgs)
+{
+    var parts = repo.Split('/');
+    if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1]))
+    {
+        formatErrors.Add($"오류: '{repo}'는 'owner/repo' 형식이 아닙니다.");
+    }
+}
+
+if (formatErrors.Count > 0)
+{
+    foreach (var error in formatErrors)
+    {
+        Console.Error.WriteLine(error);
+    }
+    Console.Error.WriteLine();
+    ShowHelp();
+    Environment.Exit(1);
+    return;
+}
 
 CoconaApp.Run((
 [Argument(Description = "대상 저장소 목록 (예: owner/repo1 owner/repo2)")] string[] repos,
@@ -24,13 +67,12 @@ CoconaApp.Run((
 ) =>
 {
     token ??= Environment.GetEnvironmentVariable("GITHUB_TOKEN");
-    if (string.IsNullOrEmpty(token)) { Console.Error.WriteLine("오류: GitHub 토큰이 필요합니다."); return; }
+    if (string.IsNullOrEmpty(token)) { Console.Error.WriteLine("오류: GitHub 토큰이 필요합니다."); Environment.Exit(1); return; }
 
     string[]? parsedKeywords = keywords != null
         ? keywords.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         : null;
 
-    // 전체 저장소 합산용 딕셔너리: 유저별 누적 기여 데이터
     var totalUserIssues = new Dictionary<string, List<IssueRecord>>();
     var totalUserPullRequests = new Dictionary<string, List<PRRecord>>();
 
@@ -137,11 +179,9 @@ CoconaApp.Run((
                 Console.Error.WriteLine("기존 캐시 없음: 전체 데이터를 수집합니다.");
             }
 
-            // 모든 PR 데이터를 한 번에 가져와서 루프 내에서 필터링 (N+1 최적화)
             var allNewPrs = service.GetPullRequests(since);
             var allNewIssues = service.GetIssues(since);
 
-            // 새로 조회된 PR과 이슈의 작성자, 기존 캐시의 작성자 목록을 통합하여 유니크한 기여자 목록 생성
             List<string> contributors = allNewPrs.Select(p => p.AuthorLogin)
                 .Concat(allNewIssues.Select(i => i.AuthorLogin))
                 .Concat(cache.UserIssues.Keys)
@@ -190,14 +230,11 @@ CoconaApp.Run((
 
                 reportData.Add((user, docIssues.Count, featureBugIssues.Count, typoPrs.Count, docPrs.Count, featureBugPrs.Count, finalScore));
 
-                // 전체 합산용 누적
                 if (repos.Length > 1)
                 {
                     if (!totalUserIssues.ContainsKey(user)) totalUserIssues[user] = new List<IssueRecord>();
                     if (!totalUserPullRequests.ContainsKey(user)) totalUserPullRequests[user] = new List<PRRecord>();
 
-                    // 저장소별 이슈/PR은 번호가 겹칠 수 있으므로 URL 기준으로 중복 방지
-                    // URL이 비어있는 경우를 대비해 URL이 있으면 URL로, 없으면 Number 기준으로 판별
                     foreach (var issue in cache.UserIssues[user])
                     {
                         bool isDuplicate = string.IsNullOrEmpty(issue.Url)
@@ -222,7 +259,6 @@ CoconaApp.Run((
 
             reportData = ReportSorter.SortReportData(reportData, sortBy, sortOrder);
 
-            // CSV 데이터 파일 생성
             var csv = new StringBuilder();
             csv.AppendLine("아이디, 문서이슈, 버그/기능이슈, 오타PR, 문서PR, 버그/기능PR, 총점");
             foreach (var r in reportData) csv.AppendLine($"{r.Id}, {r.docIssues}, {r.featBugIssues}, {r.typoPrs}, {r.docPrs}, {r.featBugPrs}, {r.Score}");
@@ -231,7 +267,6 @@ CoconaApp.Run((
             File.WriteAllText(csvPath, csv.ToString(), Encoding.UTF8);
             Console.Error.WriteLine($"기본 데이터(CSV) 저장 완료: {csvPath}");
 
-            // TXT 리포트 생성
             if (format == OutputFormat.Txt)
             {
                 string txtPath = Path.Combine(repoOutput, "results.txt");
@@ -240,7 +275,6 @@ CoconaApp.Run((
                 Console.Error.WriteLine($"가독성 리포트(TXT) 추가 저장 완료: {txtPath}");
             }
 
-            // HTML 리포트 생성
             if (format == OutputFormat.Html)
             {
                 string htmlPath = Path.Combine(repoOutput, "results.html");
@@ -255,7 +289,6 @@ CoconaApp.Run((
         }
     }
 
-    // 저장소가 1개 이상일 때 전체 합산 리포트 생성
     if (repos.Length > 1 && (totalUserIssues.Count > 0 || totalUserPullRequests.Count > 0))
     {
         try
@@ -287,7 +320,6 @@ CoconaApp.Run((
             string totalOutput = output;
             if (!Directory.Exists(totalOutput)) Directory.CreateDirectory(totalOutput);
 
-            // 합산 CSV
             var totalCsv = new StringBuilder();
             totalCsv.AppendLine("아이디, 문서이슈, 버그/기능이슈, 오타PR, 문서PR, 버그/기능PR, 총점");
             foreach (var r in totalReportData) totalCsv.AppendLine($"{r.Id}, {r.docIssues}, {r.featBugIssues}, {r.typoPrs}, {r.docPrs}, {r.featBugPrs}, {r.Score}");
@@ -296,7 +328,6 @@ CoconaApp.Run((
             File.WriteAllText(totalCsvPath, totalCsv.ToString(), Encoding.UTF8);
             Console.Error.WriteLine($"전체 합산 데이터(CSV) 저장 완료: {totalCsvPath}");
 
-            // 합산 TXT
             if (format == OutputFormat.Txt)
             {
                 string totalLabel = string.Join(" + ", repos);
@@ -306,7 +337,6 @@ CoconaApp.Run((
                 Console.Error.WriteLine($"전체 합산 리포트(TXT) 저장 완료: {totalTxtPath}");
             }
 
-            // 합산 HTML
             if (format == OutputFormat.Html)
             {
                 string totalLabel = string.Join(" + ", repos);
@@ -322,3 +352,35 @@ CoconaApp.Run((
         }
     }
 });
+
+// ── help 출력 헬퍼 ────────────────────────────────────────────────────────────
+// Cocona는 --help 처리 시 내부 ICoconaHelpRenderer를 통해 help 텍스트를 생성하고
+// stdout으로 출력한 뒤 종료한다. 검증 실패 시 현재 어셈블리를 --help로 재실행하여
+// Cocona가 생성한 help 결과를 그대로 stderr로 리디렉션함으로써
+// 코드 중복 없이 단일 지점에서 일관된 help 출력을 보장한다.
+static void ShowHelp()
+{
+    try
+    {
+        string assemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+        var psi = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = $"\"{assemblyPath}\" --help",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using var proc = Process.Start(psi);
+        if (proc != null)
+        {
+            string helpText = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit();
+            Console.Error.Write(helpText);
+        }
+    }
+    catch
+    {
+        Console.Error.WriteLine("도움말을 표시하려면 --help 옵션을 사용하세요.");
+    }
+}
